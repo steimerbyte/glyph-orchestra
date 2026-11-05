@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <color name="nothing_black">#FF000000</color>
+    <color name="nothing_white">#FFFFFFFF</color>
+    <color name="nothing_grey">#FF9A9A9A</color>
+    <color name="nothing_dim">#FF6B6B6B</color>
+    <color name="nothing_accent">#FFFFFFFF</color>
+    <!-- Panel und Rahmen der Diagramme, wie im NothingOS-Layoutsystem. -->
+    <color name="nothing_panel">#FF0D0D0D</color>
+    <color name="nothing_line">#FF242424</color>
+    <!-- Nur Warnung und Fehler: ein abgelehnter Zugang ist ein Verlust, kein Hinweis. -->
+    <color name="nothing_red">#FFD71921</color>
+
+</resources>

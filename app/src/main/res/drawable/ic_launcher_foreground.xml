@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fuenf Balken wie ein Pegel-Ausschlag, im 72-dp-Sicherheitsbereich des
+     adaptiven Icons. Eigene Form, damit die App im Drawer nicht wie Glyph Deck
+     aussieht; die Form traegt allein der Negativraum zwischen den Balken. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:pathData="M27,45h7v25h-7z"
+        android:fillColor="#FFFFFFFF" />
+    <path
+        android:pathData="M37.5,35h7v35h-7z"
+        android:fillColor="#FFFFFFFF" />
+    <path
+        android:pathData="M48,27h7v43h-7z"
+        android:fillColor="#FFD71921" />
+    <path
+        android:pathData="M58.5,35h7v35h-7z"
+        android:fillColor="#FFFFFFFF" />
+    <path
+        android:pathData="M69,45h7v25h-7z"
+        android:fillColor="#FFFFFFFF" />
+
+</vector>

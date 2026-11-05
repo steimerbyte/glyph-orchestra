@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <item name="connection_state" type="id" />
+    <item name="connection_detail" type="id" />
+    <item name="file_info" type="id" />
+    <item name="pick_button" type="id" />
+    <item name="analyze_button" type="id" />
+    <item name="progress_line" type="id" />
+    <item name="facts" type="id" />
+    <item name="band_chart" type="id" />
+    <item name="play_button" type="id" />
+    <item name="frame_line" type="id" />
+
+</resources>

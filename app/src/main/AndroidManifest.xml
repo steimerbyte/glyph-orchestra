@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Die Berechtigung gehoert zum offiziellen Glyph Developer Kit: ohne sie
+        verweigert der Glyph-Dienst von Nothing OS die Arbeit. Sie ist keine
+        Selbstbedienung: der Dienst prueft zusaetzlich den Aufrufer.
+    -->
+    <uses-permission android:name="com.nothing.ketchum.permission.ENABLE" />
+
+    <!--
+        Sichtbarkeit des Nothing-Dienstes. Gebunden wird mit expliziter
+        Komponente (com.nothing.thirdparty/.GlyphService); der Eintrag macht
+        die Absicht im Manifest lesbar und schuetzt vor Package-Visibility-
+        Ueberraschungen auf aelteren Nothing-OS-Staenden.
+    -->
+    <queries>
+        <package android:name="com.nothing.thirdparty" />
+    </queries>
+
+    <!--
+        Keine INTERNET-Berechtigung: die App spricht nur mit dem Glyph-Dienst
+        auf demselben Geraet.
+    -->
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.GlyphOrchestra">
+
+        <!--
+            API-Schluessel des GDK. Ab Android 16 prueft Nothing OS ihn nicht
+            mehr; auf aelteren Staenden ist "test" nur zusammen mit
+                adb shell settings put global nt_glyph_interface_debug_enable 1
+            gueltig. Ein eigener Schluessel kommt beim Bauen per -PnothingKey.
+        -->
+        <meta-data
+            android:name="NothingKey"
+            android:value="${nothingKey}" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.GlyphOrchestra">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+</manifest>
