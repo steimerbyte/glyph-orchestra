@@ -7,6 +7,7 @@ import com.steimerbyte.glyphorchestra.glyph.Level
 import com.steimerbyte.glyphorchestra.ui.GlyphLayout
 import java.util.Arrays
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
@@ -40,9 +41,15 @@ import kotlin.math.tanh
  * (Index 0..15 = Log-Bänder, 16 = Tieftonband). Ohne sie ist keine
  * Pegelanzeige kalibrierbar; die Vorgaben sind nur ein Notbehelf für einen
  * einzelnen Frame.
+ *
+ * [fps] ist die Rate, mit der [map] aufgerufen wird -- die Analyse-, nicht die
+ * Anzeigerate. Haltezeit, Release, Stille-Entprellung und Ausblendung sind in
+ * Sekunden festgelegt und werden daraus in Frames umgerechnet; feste
+ * Framezahlen wären bei 86,1 fps um den Faktor 2,87 zu kurz.
  */
 class BandToChannel(
     spec: DeviceSpec,
+    private val fps: Double,
     p95Db: FloatArray = FloatArray(BAND_COUNT) { DEFAULT_P95_DB },
     p10Db: FloatArray = FloatArray(BAND_COUNT) { DEFAULT_P10_DB },
 ) {
@@ -69,8 +76,35 @@ class BandToChannel(
     private val previous: FloatArray
     private var frame = 0
 
+    /** Wie viele Frames der Stille-Entprellung schon still waren. */
+    private var silentRun = 0
+
+    /** Restframes der Ausblendung nach erkannter Stille; 0 = keine. */
+    private var fadeLeft = 0
+    private val fadeFrom: FloatArray
+
     /** Zwischenpuffer der Bandhelligkeiten, damit [map] nicht alloziert. */
     private val bandY = FloatArray(BAND_COUNT)
+
+    /** Mindesthaltezeit in Frames; aufgerundet, damit sie nie unter 133 ms fällt. */
+    private val holdFrames: Int = ceil(HOLD_SEC * fps).toInt()
+
+    /** Release je Frame: 45 dB/s im 30-dB-Fenster sind 1,5 normierte Einheiten/s. */
+    private val releaseRaw: Float = (RELEASE_PER_SEC * RAW_MAX / fps).toFloat()
+
+    /**
+     * Totband als Anteil des Vollausschlags, nicht als Framezahl: es ist eine
+     * Pegelschwelle gegen 1-LSB-Glimmern, keine Zeitkonstante. Aus der
+     * Analyserate abgeleitet würde es auf 17 Rohwerte fallen und das
+     * Glimmern zurückholen.
+     */
+    private val deadbandRaw: Float = DEADBAND_FRACTION * RAW_MAX
+
+    /** Erst nach 300 ms Stille wird ausgeblendet, nicht bei jeder Lücke. */
+    private val silenceFrames: Int = ceil(SILENCE_SEC * fps).toInt()
+
+    /** Ausblenddauer in Frames; mindestens einer, sonst gäbe es keinen Abfall. */
+    private val fadeFrames: Int = max(1, ceil(FADE_SEC * fps).toInt())
 
     init {
         require(p95Db.size >= BAND_COUNT) { "p95Db braucht $BAND_COUNT Werte" }
@@ -99,6 +133,7 @@ class BandToChannel(
         holdUntil = IntArray(count)
         heldPeak = FloatArray(count)
         previous = FloatArray(count)
+        fadeFrom = FloatArray(count)
 
         if (count > 0) {
             // Kanalachse: 100 Hz bis 11 025 Hz logarithmisch über den Ring.
@@ -143,21 +178,16 @@ class BandToChannel(
         require(bandsDb.size >= BAND_COUNT) { "bandsDb braucht $BAND_COUNT Werte" }
         Arrays.fill(levels, 0)
 
-        var silent = true
-        for (b in 0 until BAND_COUNT) {
-            if (bandsDb[b] >= SILENCE_DB) {
-                silent = false
-                break
-            }
-        }
-        if (silent) {
-            // Der Bericht blendet über 150 ms aus. Unter -70 dBFS ist aber
-            // in keinem Band mehr etwas da; ein harter Schnitt ist unsichtbar
-            // und lässt keinen Zustand stehen, der nach einer Pause falsch
-            // weiterliefe.
-            reset()
+        if (isSilent(bandsDb)) {
+            // Eine Pause ist erst nach 300 ms eine Pause: kurz vorher bleibt
+            // der letzte Wert stehen, damit Phrasenlücken nicht dunkel werden.
+            // Erst danach läuft die Ausblendung über 150 ms.
+            if (++silentRun > silenceFrames) fade(levels) else hold(levels)
+            frame++
             return
         }
+        silentRun = 0
+        fadeLeft = 0
 
         for (b in 0 until BAND_COUNT) bandY[b] = brightness(bandsDb[b], b)
 
@@ -168,8 +198,7 @@ class BandToChannel(
             var y = (1f - w) * bandY[base] + w * bandY[base + 1]
             if (wantsLowBand[p]) y = max(y, bandY[LOW_BAND_INDEX])
 
-            val target = rawLevel(y, t)
-            levels[channels[p].index] = step(p, target)
+            levels[channels[p].index] = step(p, y, t)
         }
         frame++
     }
@@ -180,7 +209,41 @@ class BandToChannel(
         Arrays.fill(holdUntil, 0)
         Arrays.fill(heldPeak, 0f)
         Arrays.fill(previous, 0f)
+        silentRun = 0
+        fadeLeft = 0
         frame = 0
+    }
+
+    /** Kein Band über der Stillegrenze. */
+    private fun isSilent(bandsDb: FloatArray): Boolean {
+        for (b in 0 until BAND_COUNT) if (bandsDb[b] >= SILENCE_DB) return false
+        return true
+    }
+
+    /** Kurze Lücke: der zuletzt gezeigte Wert bleibt stehen. */
+    private fun hold(levels: IntArray) {
+        for (p in channels.indices) {
+            levels[channels[p].index] = previous[p].roundToInt().coerceIn(0, Level.MAX)
+        }
+    }
+
+    /**
+     * Ausblenden nach erkannter Stille: linear über 150 ms vom Wert beim
+     * Beginn der Ausblendung auf 0. Eine multiplikative Hüllkurve käme der
+     * Null nur nahe, hier muss am Ende exakt 0 stehen -- sonst bliebe nach
+     * einer Pause ein Rest leuchten.
+     */
+    private fun fade(levels: IntArray) {
+        if (fadeLeft == 0) {
+            System.arraycopy(previous, 0, fadeFrom, 0, previous.size)
+            fadeLeft = fadeFrames
+        }
+        fadeLeft--
+        for (p in channels.indices) {
+            val value = if (fadeLeft > 0) fadeFrom[p] * fadeLeft / fadeFrames else 0f
+            previous[p] = value
+            levels[channels[p].index] = value.roundToInt()
+        }
     }
 
     /** Helligkeit eines Bandes, 0..1: 30-dB-Fenster unter dem P95. */
@@ -195,7 +258,9 @@ class BandToChannel(
 
     /**
      * Normierte Helligkeit zu Rohwerten: Gamma 1,8, Kompression oberhalb 0,85
-     * und der Spannungssockel für bereits leuchtende Kanäle.
+     * und der Spannungssockel. Der Sockel darf nur auf Kanäle, die schon
+     * eingerastet sind -- auf einen dunklen Kanal addiert, überschritte er
+     * allein die Einschaltschwelle und der Ausschaltpunkt wäre unerreichbar.
      */
     private fun rawLevel(y: Float, tension: Float): Float {
         val compressed = if (y > COMPRESS_FROM) {
@@ -211,27 +276,35 @@ class BandToChannel(
     /**
      * Zeitverhalten eines Kanals: Schmitt-Trigger, Mindesthaltezeit,
      * Release-Rampe, Totband -- in dieser Reihenfolge aus dem Bericht.
+     *
+     * Der Trigger läuft auf [y], der Helligkeit vor Gamma und Sockel: 0,08 und
+     * 0,04 sind Anteile der Helligkeit. Am gamma-korrigierten Rohwert gemessen
+     * läge die Einschaltschwelle bei y ≈ 0,24, also dreimal zu hoch, und die
+     * Kanäle blieben bei leisen Passagen dunkel.
      */
-    private fun step(p: Int, target: Float): Int {
-        if (target >= ON_RAW) {
+    private fun step(p: Int, y: Float, tension: Float): Int {
+        if (y >= ON_Y) {
             latched[p] = true
-        } else if (target <= OFF_RAW) {
+        } else if (y <= OFF_Y) {
             latched[p] = false
         }
 
-        var value = if (latched[p]) target else 0f
-        if (value > HOLD_MIN_RAW) {
-            if (holdUntil[p] <= frame) {
-                heldPeak[p] = value
-                holdUntil[p] = frame + HOLD_FRAMES
-            }
-            if (holdUntil[p] > frame) value = max(value, heldPeak[p])
+        var value = if (latched[p]) rawLevel(y, tension) else 0f
+        // Die Haltezeit wird am lauten Frame aufgezogen und pinnt den Wert
+        // danach unabhaengig vom aktuellen y: ein 11-ms-Transient soll
+        // 133 ms sichtbar bleiben und nicht im naechsten Frame schon fallen.
+        if (latched[p] && y >= HOLD_MIN_Y && holdUntil[p] <= frame) {
+            heldPeak[p] = value
+            holdUntil[p] = frame + holdFrames
         }
+        if (holdUntil[p] > frame) value = max(value, heldPeak[p])
         // Langsamer Abfall, sofortiger Anstieg: ein Vollausschlag fällt in
         // gut 600 ms auf 8 %, ein Kick verliert seine Kante nicht.
-        value = max(value, previous[p] - RELEASE_RAW)
+        value = max(value, previous[p] - releaseRaw)
         // Totband gegen 1-LSB-Glimmern: kleine Änderungen bleiben stehen.
-        if (abs(value - previous[p]) < DEADBAND_RAW) value = previous[p]
+        // Nur bei Werten über 0: das Totband darf das Ausschalten nicht
+        // verhindern, sonst bliebe ein Rest von bis zu 48 Rohwerten stehen.
+        if (value > 0f && abs(value - previous[p]) < deadbandRaw) value = previous[p]
         previous[p] = value
         return value.roundToInt().coerceIn(0, Level.MAX)
     }
@@ -271,19 +344,39 @@ class BandToChannel(
         private const val PEDESTAL_MIN = 0.02f
         private const val PEDESTAL_RAW = 492f
 
-        /** Schmitt-Trigger: an bei 0,08, aus bei 0,04 (328/164 Rohwerte). */
-        private const val ON_RAW = 328f
-        private const val OFF_RAW = 164f
+        /**
+         * Schmitt-Trigger auf y (Helligkeit vor Gamma): an bei 0,08, aus bei
+         * 0,04 (Bericht §5.5). Die Rohwerte 328/164 im Bericht sind nur die
+         * lineare Übersetzung dieser Anteile.
+         */
+        private const val ON_Y = 0.08f
+        private const val OFF_Y = 0.04f
 
-        /** Mindesthaltezeit 4 Frames = 133 ms bei 30 fps. */
-        private const val HOLD_FRAMES = 4
-        private const val HOLD_MIN_RAW = 82f
+        /** Ab hier greift die Mindesthaltezeit (Bericht §5.5, Stufe 2). */
+        private const val HOLD_MIN_Y = 0.02f
 
-        /** Release 45 dB/s; im 30-dB-Fenster sind das 0,05 je Frame. */
-        private const val RELEASE_RAW = 205f
+        /**
+         * Mindesthaltezeit 133 ms. Aufgerundet, damit sie an keiner Rate
+         * darunter liegt: bei 86,133 fps sind das 12 Frames = 139 ms,
+         * abgerundet wären es 127 ms und damit zu kurz.
+         */
+        private const val HOLD_SEC = 0.133
 
-        /** Totband 48 Rohwerte = 1,2 %. */
-        private const val DEADBAND_RAW = 48f
+        /**
+         * Release 45 dB/s, im 30-dB-Fenster 1,5 normierte Einheiten je
+         * Sekunde. Je Frame ist das 1,5·4095/fps, nicht 0,05·4095: der Wert
+         * 205 gilt nur bei 30 fps.
+         */
+        private const val RELEASE_PER_SEC = 1.5
+
+        /** Stille zählt erst ab 300 ms (Bericht §5.6), nicht ab dem ersten stillen Frame. */
+        private const val SILENCE_SEC = 0.3
+
+        /** Ausblenddauer nach erkannter Stille. */
+        private const val FADE_SEC = 0.15
+
+        /** Totband 1,2 % des Vollausschlags (Bericht §5.5, Stufe 4). */
+        private const val DEADBAND_FRACTION = 0.012f
 
         private const val DEFAULT_P95_DB = -6f
         private const val DEFAULT_P10_DB = -60f

@@ -57,6 +57,64 @@ class AnalyzerTest {
 
     private val spec = DeviceCatalog.PHONE_3A
 
+    /** Helligkeit eines Anzeigeframes: der hellste der 36 Kanaele. */
+    private fun brightest(r: AnalysisResult, frame: Int): Int =
+        (frame * 36 until (frame + 1) * 36).maxOf { r.levels[it] }
+
+    @Test
+    fun `ein einsatz bei 1 komma 3 sekunden landet auf anzeigeframe 39`() {
+        // 1,3 s sind 39 Anzeigeframes zu 30 fps. Der Analyseframe, dessen
+        // Fenstermitte dort liegt, ist 39*86,133/30 - 2 = 110; ohne den Abzug
+        // der Fenstermitte liegt der Einsatz bei Frame 38.
+        //
+        // Signal: Stille bis 1,3 s, danach ein Dauerton. Das erste Bild, das
+        // hell wird, ist damit die Abbildung dieses Einsatzes.
+        val sr = 44100
+        val pcm = FloatArray(2 * sr)
+        val start = (1.3 * sr).toInt()
+        for (i in start until pcm.size) {
+            pcm[i] = (0.9 * sin(2 * PI * 1000 * (i - start) / sr)).toFloat()
+        }
+
+        val r = Analyzer.analyze(ArraySource(sr, pcm), spec)
+        val firstLit = (0 until r.frames).first { brightest(r, it) > 0 }
+        assertEquals("Einsatz bei Frame $firstLit statt 39", 39, firstLit)
+    }
+
+    @Test
+    fun `novelty misst die timbre-aenderung, nicht die lautheit`() {
+        val novelty = TimbreNovelty(Dsp.analysisFps(44100))
+        val count = BandToChannel.BAND_COUNT
+
+        // Ein Kick: dieselbe dB-Form, nur 30 dB lauter. Der Onset-Fluss
+        // schlaegt hier voll aus, die Timbre-Novelty darf es nicht.
+        val lowHeavy = FloatArray(count) { b -> -4f * b }
+        val loud = FloatArray(count) { b -> -4f * b + 30f }
+        novelty.push(lowHeavy)
+        val kick = maxOf(novelty.push(loud), novelty.push(loud))
+        assertTrue("Kick erzeugt Novelty $kick", kick < 0.01f)
+
+        // Ein Instrumentenwechsel: die Hoehen uebernehmen, die Tiefen fallen
+        // weg -- eine andere Richtung, nicht nur ein anderer Pegel. Im
+        // Wechsel ist die Rohdistanz in jedem Frame gleich gross; die EMA
+        // naehert sich ihr mit tau = 200 ms.
+        val highHeavy = FloatArray(count) { b -> -4f * (16 - b) }
+        var up = false
+        var after200Ms = 0f
+        repeat(17) {
+            after200Ms = novelty.push(if (up) lowHeavy else highHeavy)
+            up = !up
+        }
+        var settled = 0f
+        repeat(200) {
+            settled = novelty.push(if (up) lowHeavy else highHeavy)
+            up = !up
+        }
+        assertTrue("Wechsel ergibt nur $settled", settled > 0.3f)
+        // EMA mit tau = 200 ms: nach 17 Frames sind es 1 - exp(-1) = 63 %.
+        assertEquals(0.63, (after200Ms / settled).toDouble(), 0.05)
+    }
+
     @Test
     fun `klickzug wird als 120 bpm erkannt`() {
         val r = Analyzer.analyze(ArraySource(44100, clickTrack(8.0, 120.0)), spec)
@@ -86,5 +144,27 @@ class AnalyzerTest {
     fun `dauerklang liefert keine beats`() {
         val r = Analyzer.analyze(ArraySource(44100, tone(4.0, 440.0)), spec)
         assertTrue("Konfidenz ${r.confidence}", r.confidence < 0.5)
+    }
+
+    @Test
+    fun `die spannung haengt am beat-raster`() {
+        // Klicks bis 3 s, danach eine Sekunde Stille. Hinter dem letzten Beat
+        // haelt quantize die Spannung auf dem Wert des letzten Rasterpunkts;
+        // ohne Quantisierung faellt sie in der Stille mit tau = 0,4 s ab.
+        val head = clickTrack(3.2, 120.0)
+        val pcm = FloatArray(4 * 44100)
+        System.arraycopy(head, 0, pcm, 0, head.size)
+        val r = Analyzer.analyze(ArraySource(44100, pcm), spec)
+
+        assertTrue("Beats: ${r.beats.size}", r.beats.size >= 5)
+        val lastBeat = r.beats.last()
+        assertTrue("letzter Beat bei $lastBeat", lastBeat < 3.5)
+        val from = (lastBeat * 30).toInt() + 2
+        assertTrue("nur ${r.frames} Frames", from < r.frames - 5)
+        val held = r.tension[from]
+        assertTrue("Spannung hinter dem letzten Beat ist $held", held > 0.02f)
+        for (m in from until r.frames) {
+            assertEquals("Frame $m weicht ab", held, r.tension[m], 0f)
+        }
     }
 }
